@@ -51,7 +51,13 @@ export async function POST(
     const clientState = sanitizeState(result.state);
     await broadcastState(roomCode, clientState);
 
-    return NextResponse.json({ state: clientState });
+    // For join actions, return the new player's index
+    const response: Record<string, unknown> = { state: clientState };
+    if (action.type === "join") {
+      response.playerIndex = result.state.players.length - 1;
+    }
+
+    return NextResponse.json(response);
   } catch (error) {
     console.error("Action error:", error);
     return NextResponse.json(

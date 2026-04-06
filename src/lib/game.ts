@@ -1,6 +1,6 @@
 import {
   Card, Suit, Rank, GameState, GameAction, ClientGameState,
-  PlayerState, SUITS, RANKS, STARTING_CHIPS,
+  PlayerState, HandState, SUITS, RANKS, STARTING_CHIPS,
 } from "./types";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -53,9 +53,28 @@ export function isBlackjack(hand: Card[]): boolean {
   return hand.length === 2 && handValue(hand) === 21;
 }
 
+/** Check if two cards can be split (same rank, or both are 10-value) */
+function canSplit(hand: Card[]): boolean {
+  if (hand.length !== 2) return false;
+  const r1 = hand[0].rank;
+  const r2 = hand[1].rank;
+  // Same rank
+  if (r1 === r2) return true;
+  // Both 10-value (10, J, Q, K)
+  const tenValues = ["10", "J", "Q", "K"];
+  if (tenValues.includes(r1) && tenValues.includes(r2)) return true;
+  return false;
+}
+
+/** Card numeric value for split check (10-value cards all return 10) */
+function cardNumericValue(rank: string): number {
+  if (rank === "A") return 11;
+  if (["K", "Q", "J"].includes(rank)) return 10;
+  return parseInt(rank);
+}
+
 function drawCard(shoe: Card[], faceDown = false): Card {
   if (shoe.length === 0) {
-    // Emergency reshuffle (shouldn't happen normally)
     const newShoe = createShoe();
     shoe.push(...newShoe);
   }
@@ -72,20 +91,24 @@ function reshuffleIfNeeded(state: GameState): void {
 
 // ─── State Creation ─────────────────────────────────────────────────────────
 
+function createEmptyPlayer(name: string): PlayerState {
+  return {
+    name,
+    hands: [],
+    currentHandIndex: 0,
+    chips: STARTING_CHIPS,
+    insuranceBet: 0,
+    status: "waiting",
+    bet: 0,
+  };
+}
+
 export function createGameState(code: string, playerName: string): GameState {
   const shoe = createShoe();
   return {
     code,
     phase: "waiting",
-    players: [
-      {
-        name: playerName,
-        hand: [],
-        bet: 0,
-        chips: STARTING_CHIPS,
-        status: "waiting",
-      },
-    ],
+    players: [createEmptyPlayer(playerName)],
     dealerHand: [],
     shoe,
     currentPlayer: 0,
@@ -99,18 +122,20 @@ export function createGameState(code: string, playerName: string): GameState {
 // ─── Sanitize for Client ────────────────────────────────────────────────────
 
 export function sanitizeState(state: GameState): ClientGameState {
+  const maskCard = (c: Card) =>
+    c.faceDown ? { suit: "♠" as Suit, rank: "A" as Rank, faceDown: true } : c;
+
   return {
     code: state.code,
     phase: state.phase,
     players: state.players.map((p) => ({
       ...p,
-      hand: p.hand.map((c) =>
-        c.faceDown ? { suit: "♠" as Suit, rank: "A" as Rank, faceDown: true } : c
-      ),
+      hands: p.hands.map((h) => ({
+        ...h,
+        cards: h.cards.map(maskCard),
+      })),
     })),
-    dealerHand: state.dealerHand.map((c) =>
-      c.faceDown ? { suit: "♠" as Suit, rank: "A" as Rank, faceDown: true } : c
-    ),
+    dealerHand: state.dealerHand.map(maskCard),
     currentPlayer: state.currentPlayer,
     message: state.message,
     roundNumber: state.roundNumber,
@@ -126,11 +151,13 @@ function playDealerTurn(state: GameState): void {
   // Flip face-down card
   state.dealerHand = state.dealerHand.map((c) => ({ ...c, faceDown: false }));
 
-  // Check if all players busted
-  const allBust = state.players.every((p) => p.status === "bust");
-  if (allBust) return;
+  // Check if all player hands busted or surrendered
+  const allBustOrSurrender = state.players.every((p) =>
+    p.hands.every((h) => h.status === "bust" || h.status === "surrendered")
+  );
+  if (allBustOrSurrender) return;
 
-  // Dealer draws to 17+
+  // Dealer draws to 17+ (hits on soft 17)
   while (handValue(state.dealerHand) < 17) {
     state.dealerHand.push(drawCard(state.shoe));
   }
@@ -142,56 +169,152 @@ function resolveRound(state: GameState): void {
   const dealerBJ = isBlackjack(state.dealerHand);
 
   state.players = state.players.map((p) => {
-    const pVal = handValue(p.hand);
-    const pBJ = isBlackjack(p.hand);
-    let result: PlayerState["result"];
-    let payout = 0;
-
-    if (p.status === "bust") {
-      result = "lose";
-    } else if (pBJ && dealerBJ) {
-      result = "push";
-      payout = p.bet;
-    } else if (pBJ) {
-      result = "blackjack";
-      payout = p.bet + Math.floor(p.bet * 1.5);
-    } else if (dealerBust) {
-      result = "win";
-      payout = p.bet * 2;
-    } else if (pVal > dealerVal) {
-      result = "win";
-      payout = p.bet * 2;
-    } else if (pVal === dealerVal) {
-      result = "push";
-      payout = p.bet;
-    } else {
-      result = "lose";
+    // Resolve insurance
+    let insuranceResult: PlayerState["insuranceResult"];
+    if (p.insuranceBet > 0) {
+      if (dealerBJ) {
+        insuranceResult = "win";
+        p.chips += p.insuranceBet * 3; // pays 2:1 + original back
+      } else {
+        insuranceResult = "lose";
+        // insurance bet already deducted
+      }
     }
 
-    return { ...p, result, chips: p.chips + payout, status: "done" as const };
+    // Resolve each hand
+    const resolvedHands = p.hands.map((h) => {
+      const pVal = handValue(h.cards);
+      const pBJ = isBlackjack(h.cards) && p.hands.length === 1; // no BJ on split hands
+      let result: HandState["result"];
+      let payout = 0;
+
+      if (h.status === "surrendered") {
+        result = "surrender";
+        // half bet already returned when surrendering
+      } else if (h.status === "bust") {
+        result = "lose";
+      } else if (pBJ && dealerBJ) {
+        result = "push";
+        payout = h.bet;
+      } else if (pBJ) {
+        result = "blackjack";
+        payout = h.bet + Math.floor(h.bet * 1.5);
+      } else if (dealerBust) {
+        result = "win";
+        payout = h.bet * 2;
+      } else if (pVal > dealerVal) {
+        result = "win";
+        payout = h.bet * 2;
+      } else if (pVal === dealerVal) {
+        result = "push";
+        payout = h.bet;
+      } else {
+        result = "lose";
+      }
+
+      return { ...h, result, status: h.status as HandState["status"] } as HandState & { _payout: number };
+    });
+
+    // Calculate total payout
+    let totalPayout = 0;
+    const finalHands = resolvedHands.map((h) => {
+      const pVal = handValue(h.cards);
+      const pBJ = isBlackjack(h.cards) && p.hands.length === 1;
+      let payout = 0;
+
+      if (h.result === "surrender") {
+        payout = 0; // already handled
+      } else if (h.result === "lose") {
+        payout = 0;
+      } else if (h.result === "push") {
+        payout = h.bet;
+      } else if (h.result === "blackjack") {
+        payout = h.bet + Math.floor(h.bet * 1.5);
+      } else if (h.result === "win") {
+        payout = h.bet * 2;
+      }
+
+      totalPayout += payout;
+      return { cards: h.cards, bet: h.bet, status: h.status, result: h.result } as HandState;
+    });
+
+    return {
+      ...p,
+      hands: finalHands,
+      chips: p.chips + totalPayout,
+      insuranceResult,
+      status: "done" as const,
+    };
   });
 
   state.phase = "results";
   state.message = "Round complete!";
 }
 
-// ─── Advance Player / Trigger Dealer ────────────────────────────────────────
+// ─── Advance Hand / Player / Trigger Dealer ───────────────────────────────
 
-function advanceAfterPlayerDone(state: GameState): void {
+function isHandDone(h: HandState): boolean {
+  return h.status === "bust" || h.status === "standing" || h.status === "blackjack" || h.status === "doubled" || h.status === "surrendered";
+}
+
+function advanceAfterHandDone(state: GameState): void {
+  const p = state.players[state.currentPlayer];
+
+  // Check if there's another hand for this player (split)
+  const nextHand = p.currentHandIndex + 1;
+  if (nextHand < p.hands.length) {
+    p.currentHandIndex = nextHand;
+    const hand = p.hands[nextHand];
+
+    // Deal a second card to the split hand if it only has one
+    if (hand.cards.length === 1) {
+      reshuffleIfNeeded(state);
+      hand.cards.push(drawCard(state.shoe));
+    }
+
+    // Check for auto-21
+    if (handValue(hand.cards) === 21) {
+      hand.status = "standing";
+      state.message = `${p.name}'s Hand ${nextHand + 1} has 21!`;
+      advanceAfterHandDone(state);
+    } else {
+      state.message = `${p.name}'s Hand ${nextHand + 1}`;
+    }
+    return;
+  }
+
+  // All hands for this player are done, advance to next player
+  p.status = "done";
+  advanceToNextPlayer(state);
+}
+
+function advanceToNextPlayer(state: GameState): void {
   const next = state.currentPlayer + 1;
   if (next < state.players.length) {
     const nextPlayer = state.players[next];
-    if (
-      nextPlayer.status === "blackjack" ||
-      nextPlayer.status === "bust" ||
-      nextPlayer.status === "standing"
-    ) {
-      state.currentPlayer = next;
-      // Recursively check if this player is also done
-      advanceAfterPlayerDone(state);
+    state.currentPlayer = next;
+
+    // Check if all hands are already done (blackjack, etc.)
+    const allHandsDone = nextPlayer.hands.every(isHandDone);
+    if (allHandsDone) {
+      nextPlayer.status = "done";
+      advanceToNextPlayer(state);
     } else {
-      state.currentPlayer = next;
-      state.message = `${nextPlayer.name}'s turn`;
+      nextPlayer.status = "playing";
+      nextPlayer.currentHandIndex = 0;
+
+      // Find first playable hand
+      while (nextPlayer.currentHandIndex < nextPlayer.hands.length && isHandDone(nextPlayer.hands[nextPlayer.currentHandIndex])) {
+        nextPlayer.currentHandIndex++;
+      }
+
+      if (nextPlayer.currentHandIndex >= nextPlayer.hands.length) {
+        nextPlayer.status = "done";
+        advanceToNextPlayer(state);
+      } else {
+        const handLabel = nextPlayer.hands.length > 1 ? ` Hand ${nextPlayer.currentHandIndex + 1}` : "";
+        state.message = `${nextPlayer.name}'s${handLabel} turn`;
+      }
     }
   } else {
     // All players done → dealer turn
@@ -208,7 +331,6 @@ export function processAction(
   state: GameState,
   action: GameAction
 ): { state: GameState; error?: string } {
-  // Deep clone so we don't mutate the original
   const s: GameState = JSON.parse(JSON.stringify(state));
   s.version++;
 
@@ -218,17 +340,23 @@ export function processAction(
       if (s.phase !== "waiting") {
         return { state: s, error: "Game already started" };
       }
-      if (s.players.length >= 2) {
-        return { state: s, error: "Room is full" };
+      if (s.players.length >= 6) {
+        return { state: s, error: "Room is full (max 6 players)" };
       }
-      s.players.push({
-        name: action.playerName,
-        hand: [],
-        bet: 0,
-        chips: STARTING_CHIPS,
-        status: "betting",
-      });
-      s.players[0].status = "betting";
+      const newPlayer = createEmptyPlayer(action.playerName);
+      newPlayer.status = "waiting";
+      s.players.push(newPlayer);
+      s.message = `${s.players.length}/6 players — Waiting for host to start...`;
+      return { state: s };
+    }
+
+    // ── Start Game (host only) ──────────────────────────────────────────
+    case "start_game": {
+      if (s.phase !== "waiting") return { state: s, error: "Game already started" };
+      if (s.players.length < 2) return { state: s, error: "Need at least 2 players" };
+      for (const player of s.players) {
+        player.status = "betting";
+      }
       s.phase = "betting";
       s.message = "Place your bets!";
       s.roundNumber = 1;
@@ -264,29 +392,101 @@ export function processAction(
       // Check if all players have confirmed bets
       const allDone = s.players.every((pl) => pl.status === "done" && pl.bet > 0);
       if (allDone) {
-        // Deal initial cards
         reshuffleIfNeeded(s);
-        const p1Hand = [drawCard(s.shoe), drawCard(s.shoe)];
-        const p2Hand = [drawCard(s.shoe), drawCard(s.shoe)];
-        const dHand = [drawCard(s.shoe), drawCard(s.shoe, true)];
 
-        s.players[0].hand = p1Hand;
-        s.players[0].status = isBlackjack(p1Hand) ? "blackjack" : "playing";
-        s.players[1].hand = p2Hand;
-        s.players[1].status = isBlackjack(p2Hand) ? "blackjack" : "playing";
+        // Deal initial hands
+        for (const player of s.players) {
+          const cards = [drawCard(s.shoe), drawCard(s.shoe)];
+          player.hands = [{
+            cards,
+            bet: player.bet,
+            status: isBlackjack(cards) ? "blackjack" : "playing",
+          }];
+          player.currentHandIndex = 0;
+          player.insuranceBet = 0;
+          player.insuranceResult = undefined;
+        }
+
+        const dHand = [drawCard(s.shoe), drawCard(s.shoe, true)];
         s.dealerHand = dHand;
+
+        // Check if dealer's up card is an Ace → insurance phase
+        const dealerUpCard = dHand[0];
+        if (dealerUpCard.rank === "A") {
+          s.phase = "insurance";
+          s.message = "Dealer shows Ace — Insurance?";
+          // Mark players as needing to decide
+          for (const player of s.players) {
+            player.status = "betting"; // reuse for insurance decision
+          }
+          return { state: s };
+        }
+
+        // No insurance needed, go to playing
         s.phase = "playing";
         s.currentPlayer = 0;
 
         // Skip players with blackjack
-        if (s.players[0].status === "blackjack") {
-          s.message = `${s.players[0].name} has Blackjack!`;
-          advanceAfterPlayerDone(s);
+        const p0 = s.players[0];
+        if (p0.hands[0].status === "blackjack") {
+          p0.status = "done";
+          s.message = `${p0.name} has Blackjack!`;
+          advanceToNextPlayer(s);
         } else {
-          s.message = `${s.players[0].name}'s turn`;
+          p0.status = "playing";
+          s.message = `${p0.name}'s turn`;
         }
       } else {
         s.message = `${p.name} is ready. Waiting for other player...`;
+      }
+      return { state: s };
+    }
+
+    // ── Insurance ─────────────────────────────────────────────────────────
+    case "insurance": {
+      if (s.phase !== "insurance") return { state: s, error: "Not insurance phase" };
+      const p = s.players[action.playerIndex];
+      if (!p || p.status !== "betting") return { state: s, error: "Already decided" };
+
+      if (action.accept) {
+        const insuranceCost = Math.floor(p.hands[0].bet / 2);
+        if (insuranceCost > p.chips) {
+          return { state: s, error: "Not enough chips for insurance" };
+        }
+        p.insuranceBet = insuranceCost;
+        p.chips -= insuranceCost;
+      }
+      p.status = "done";
+
+      // Check if all players have decided
+      const allDecided = s.players.every((pl) => pl.status === "done");
+      if (allDecided) {
+        // Check if dealer has blackjack
+        const dealerBJ = isBlackjack(s.dealerHand.map(c => ({ ...c, faceDown: false })));
+
+        if (dealerBJ) {
+          // Reveal dealer cards and resolve
+          s.dealerHand = s.dealerHand.map(c => ({ ...c, faceDown: false }));
+          s.phase = "dealer-turn";
+          s.message = "Dealer has Blackjack!";
+          resolveRound(s);
+        } else {
+          // No dealer blackjack, proceed to play
+          s.phase = "playing";
+          s.currentPlayer = 0;
+
+          const p0 = s.players[0];
+          if (p0.hands[0].status === "blackjack") {
+            p0.status = "done";
+            s.message = `${p0.name} has Blackjack!`;
+            advanceToNextPlayer(s);
+          } else {
+            p0.status = "playing";
+            s.message = `${p0.name}'s turn`;
+          }
+        }
+      } else {
+        s.message = "Waiting for insurance decisions...";
       }
       return { state: s };
     }
@@ -299,18 +499,23 @@ export function processAction(
       const p = s.players[pi];
       if (p.status !== "playing") return { state: s, error: "Cannot hit" };
 
+      const hand = p.hands[p.currentHandIndex];
+      if (!hand || isHandDone(hand)) return { state: s, error: "Hand is done" };
+
       reshuffleIfNeeded(s);
-      p.hand.push(drawCard(s.shoe));
-      const val = handValue(p.hand);
+      hand.cards.push(drawCard(s.shoe));
+      const val = handValue(hand.cards);
 
       if (val > 21) {
-        p.status = "bust";
-        s.message = `${p.name} busts! (${val})`;
-        advanceAfterPlayerDone(s);
+        hand.status = "bust";
+        const handLabel = p.hands.length > 1 ? ` Hand ${p.currentHandIndex + 1}` : "";
+        s.message = `${p.name}${handLabel} busts! (${val})`;
+        advanceAfterHandDone(s);
       } else if (val === 21) {
-        p.status = "standing";
-        s.message = `${p.name} has 21!`;
-        advanceAfterPlayerDone(s);
+        hand.status = "standing";
+        const handLabel = p.hands.length > 1 ? ` Hand ${p.currentHandIndex + 1}` : "";
+        s.message = `${p.name}${handLabel} has 21!`;
+        advanceAfterHandDone(s);
       }
       return { state: s };
     }
@@ -322,9 +527,134 @@ export function processAction(
       const p = s.players[pi];
       if (p.status !== "playing") return { state: s, error: "Cannot stand" };
 
-      p.status = "standing";
-      s.message = `${p.name} stands.`;
-      advanceAfterPlayerDone(s);
+      const hand = p.hands[p.currentHandIndex];
+      if (!hand || isHandDone(hand)) return { state: s, error: "Hand is done" };
+
+      hand.status = "standing";
+      const handLabel = p.hands.length > 1 ? ` Hand ${p.currentHandIndex + 1}` : "";
+      s.message = `${p.name}${handLabel} stands.`;
+      advanceAfterHandDone(s);
+      return { state: s };
+    }
+
+    // ── Double Down ──────────────────────────────────────────────────────
+    case "double_down": {
+      if (s.phase !== "playing") return { state: s, error: "Not playing phase" };
+      const pi = action.playerIndex;
+      if (pi !== s.currentPlayer) return { state: s, error: "Not your turn" };
+      const p = s.players[pi];
+      if (p.status !== "playing") return { state: s, error: "Cannot double down" };
+
+      const hand = p.hands[p.currentHandIndex];
+      if (!hand || hand.cards.length !== 2) {
+        return { state: s, error: "Can only double down on first two cards" };
+      }
+      if (hand.bet > p.chips) {
+        return { state: s, error: "Not enough chips to double down" };
+      }
+
+      // Double the bet
+      p.chips -= hand.bet;
+      hand.bet *= 2;
+
+      // Draw exactly one card
+      reshuffleIfNeeded(s);
+      hand.cards.push(drawCard(s.shoe));
+      const val = handValue(hand.cards);
+
+      if (val > 21) {
+        hand.status = "bust";
+        const handLabel = p.hands.length > 1 ? ` Hand ${p.currentHandIndex + 1}` : "";
+        s.message = `${p.name}${handLabel} doubles down and busts! (${val})`;
+      } else {
+        hand.status = "doubled";
+        const handLabel = p.hands.length > 1 ? ` Hand ${p.currentHandIndex + 1}` : "";
+        s.message = `${p.name}${handLabel} doubles down. (${val})`;
+      }
+
+      advanceAfterHandDone(s);
+      return { state: s };
+    }
+
+    // ── Split ────────────────────────────────────────────────────────────
+    case "split": {
+      if (s.phase !== "playing") return { state: s, error: "Not playing phase" };
+      const pi = action.playerIndex;
+      if (pi !== s.currentPlayer) return { state: s, error: "Not your turn" };
+      const p = s.players[pi];
+      if (p.status !== "playing") return { state: s, error: "Cannot split" };
+
+      const hand = p.hands[p.currentHandIndex];
+      if (!hand || !canSplit(hand.cards)) {
+        return { state: s, error: "Cannot split this hand" };
+      }
+      if (p.hands.length >= 2) {
+        return { state: s, error: "Can only split once" };
+      }
+      if (hand.bet > p.chips) {
+        return { state: s, error: "Not enough chips to split" };
+      }
+
+      // Create two hands from the split
+      const card1 = hand.cards[0];
+      const card2 = hand.cards[1];
+
+      // Deduct chips for the second hand
+      p.chips -= hand.bet;
+
+      // First hand: first card + new card
+      reshuffleIfNeeded(s);
+      const newCard1 = drawCard(s.shoe);
+      p.hands[p.currentHandIndex] = {
+        cards: [card1, newCard1],
+        bet: hand.bet,
+        status: "playing",
+      };
+
+      // Second hand: second card (will get dealt a card when it becomes active)
+      p.hands.push({
+        cards: [card2],
+        bet: hand.bet,
+        status: "playing",
+      });
+
+      const firstHand = p.hands[p.currentHandIndex];
+      // Check if first split hand hits 21
+      if (handValue(firstHand.cards) === 21) {
+        firstHand.status = "standing";
+        s.message = `${p.name}'s Hand 1 has 21!`;
+        advanceAfterHandDone(s);
+      } else {
+        s.message = `${p.name}'s Hand 1`;
+      }
+
+      return { state: s };
+    }
+
+    // ── Surrender ────────────────────────────────────────────────────────
+    case "surrender": {
+      if (s.phase !== "playing") return { state: s, error: "Not playing phase" };
+      const pi = action.playerIndex;
+      if (pi !== s.currentPlayer) return { state: s, error: "Not your turn" };
+      const p = s.players[pi];
+      if (p.status !== "playing") return { state: s, error: "Cannot surrender" };
+
+      const hand = p.hands[p.currentHandIndex];
+      if (!hand || hand.cards.length !== 2) {
+        return { state: s, error: "Can only surrender on first two cards" };
+      }
+      if (p.hands.length > 1) {
+        return { state: s, error: "Cannot surrender a split hand" };
+      }
+
+      // Return half the bet
+      const halfBet = Math.floor(hand.bet / 2);
+      p.chips += halfBet;
+      hand.bet = hand.bet - halfBet; // remaining lost bet
+      hand.status = "surrendered";
+
+      s.message = `${p.name} surrenders.`;
+      advanceAfterHandDone(s);
       return { state: s };
     }
 
@@ -334,10 +664,12 @@ export function processAction(
       reshuffleIfNeeded(s);
       s.players = s.players.map((p) => ({
         ...p,
-        hand: [],
+        hands: [],
+        currentHandIndex: 0,
         bet: 0,
+        insuranceBet: 0,
+        insuranceResult: undefined,
         status: "betting" as const,
-        result: undefined,
       }));
       s.dealerHand = [];
       s.phase = "betting";
@@ -350,11 +682,13 @@ export function processAction(
     case "back_to_lobby": {
       s.players = s.players.map((p) => ({
         ...p,
-        hand: [],
+        hands: [],
+        currentHandIndex: 0,
         bet: 0,
         chips: STARTING_CHIPS,
+        insuranceBet: 0,
+        insuranceResult: undefined,
         status: "betting" as const,
-        result: undefined,
       }));
       s.dealerHand = [];
       s.shoe = createShoe();

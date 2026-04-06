@@ -47,7 +47,7 @@ export default function Home() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to join room");
       sessionStorage.setItem("playerName", name.trim());
-      sessionStorage.setItem("playerIndex", "1");
+      sessionStorage.setItem("playerIndex", String(data.playerIndex ?? 1));
       router.push(`/game/${code}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
@@ -88,7 +88,7 @@ export default function Home() {
           marginBottom: 40,
         }}
       >
-        2 Players vs. Dealer — Real-Time Multiplayer
+        2–6 Players vs. Dealer — Real-Time Multiplayer
       </p>
 
       {error && (
@@ -219,7 +219,7 @@ export default function Home() {
                 marginBottom: 12,
               }}
             >
-              {loading ? "Creating..." : "Create & Wait for Player 2"}
+              {loading ? "Creating..." : "Create & Wait for Players"}
             </button>
             <br />
             <button

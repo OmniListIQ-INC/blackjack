@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { getPusherClient } from "@/lib/pusher-client";
-import type { ClientGameState, Card } from "@/lib/types";
+import type { ClientGameState, Card, HandState } from "@/lib/types";
 import { CHIP_VALUES, CHIP_COLORS } from "@/lib/types";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -25,23 +25,36 @@ function isRed(suit: string): boolean {
   return suit === "♥" || suit === "♦";
 }
 
+function canSplitHand(hand: Card[]): boolean {
+  if (hand.length !== 2) return false;
+  const r1 = hand[0].rank;
+  const r2 = hand[1].rank;
+  if (r1 === r2) return true;
+  const tenValues = ["10", "J", "Q", "K"];
+  return tenValues.includes(r1) && tenValues.includes(r2);
+}
+
 // ─── Card Component ─────────────────────────────────────────────────────────
 
-function CardDisplay({ card, index }: { card: Card; index: number }) {
+function CardDisplay({ card, index, small }: { card: Card; index: number; small?: boolean }) {
+  const w = small ? 60 : 80;
+  const h = small ? 84 : 112;
+
   if (card.faceDown) {
     return (
       <div
         className="card-enter"
         style={{
-          width: 80, height: 112, borderRadius: 8,
+          width: w, height: h, borderRadius: 8,
           background: "repeating-linear-gradient(135deg, #1a3a5c, #1a3a5c 10px, #1e4d7a 10px, #1e4d7a 20px)",
           border: "2px solid #d4a843",
           boxShadow: "2px 3px 8px rgba(0,0,0,0.4)",
           display: "flex", alignItems: "center", justifyContent: "center",
           animationDelay: `${index * 0.15}s`, animationFillMode: "backwards",
+          flexShrink: 0,
         }}
       >
-        <span style={{ fontSize: "1.5rem", color: "#d4a843" }}>♠</span>
+        <span style={{ fontSize: small ? "1.1rem" : "1.5rem", color: "#d4a843" }}>♠</span>
       </div>
     );
   }
@@ -51,19 +64,20 @@ function CardDisplay({ card, index }: { card: Card; index: number }) {
     <div
       className="card-enter"
       style={{
-        width: 80, height: 112, borderRadius: 8,
+        width: w, height: h, borderRadius: 8,
         background: "#f5f5f0", border: "1px solid #ccc",
         boxShadow: "2px 3px 8px rgba(0,0,0,0.4)",
         display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
         position: "relative", color, fontWeight: "bold", fontFamily: "Georgia, serif",
         animationDelay: `${index * 0.15}s`, animationFillMode: "backwards",
+        flexShrink: 0,
       }}
     >
-      <span style={{ position: "absolute", top: 6, left: 8, fontSize: "0.75rem" }}>{card.suit}</span>
-      <span style={{ position: "absolute", top: 18, left: 8, fontSize: "0.7rem" }}>{card.rank}</span>
-      <span style={{ fontSize: "2rem" }}>{card.suit}</span>
-      <span style={{ position: "absolute", bottom: 6, right: 8, fontSize: "0.75rem", transform: "rotate(180deg)" }}>{card.suit}</span>
-      <span style={{ position: "absolute", bottom: 18, right: 8, fontSize: "0.7rem", transform: "rotate(180deg)" }}>{card.rank}</span>
+      <span style={{ position: "absolute", top: 4, left: 6, fontSize: small ? "0.6rem" : "0.75rem" }}>{card.suit}</span>
+      <span style={{ position: "absolute", top: small ? 14 : 18, left: 6, fontSize: small ? "0.55rem" : "0.7rem" }}>{card.rank}</span>
+      <span style={{ fontSize: small ? "1.4rem" : "2rem" }}>{card.suit}</span>
+      <span style={{ position: "absolute", bottom: 4, right: 6, fontSize: small ? "0.6rem" : "0.75rem", transform: "rotate(180deg)" }}>{card.suit}</span>
+      <span style={{ position: "absolute", bottom: small ? 14 : 18, right: 6, fontSize: small ? "0.55rem" : "0.7rem", transform: "rotate(180deg)" }}>{card.rank}</span>
     </div>
   );
 }
@@ -76,9 +90,9 @@ function Chip({ value, onClick, disabled }: { value: number; onClick: () => void
       onClick={onClick}
       disabled={disabled}
       style={{
-        width: 52, height: 52, borderRadius: "50%",
+        width: 48, height: 48, borderRadius: "50%",
         background: CHIP_COLORS[value], color: "white",
-        fontWeight: "bold", fontSize: "0.75rem",
+        fontWeight: "bold", fontSize: "0.7rem",
         border: "3px dashed rgba(255,255,255,0.6)",
         cursor: disabled ? "not-allowed" : "pointer",
         opacity: disabled ? 0.4 : 1,
@@ -87,6 +101,99 @@ function Chip({ value, onClick, disabled }: { value: number; onClick: () => void
     >
       ${value}
     </button>
+  );
+}
+
+// ─── Action Button ──────────────────────────────────────────────────────────
+
+function ActionBtn({ label, onClick, color, disabled }: { label: string; onClick: () => void; color: string; disabled?: boolean }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        padding: "10px 20px",
+        background: disabled ? "rgba(255,255,255,0.1)" : color,
+        color: "white", border: "none", borderRadius: 8,
+        fontSize: "0.85rem", fontWeight: "bold", cursor: disabled ? "not-allowed" : "pointer",
+        textTransform: "uppercase", letterSpacing: 1, fontFamily: "Georgia, serif",
+        opacity: disabled ? 0.4 : 1, transition: "all 0.2s",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
+// ─── Hand Display ───────────────────────────────────────────────────────────
+
+function HandDisplay({ hand, handIndex, totalHands, isActive }: {
+  hand: HandState; handIndex: number; totalHands: number; isActive: boolean;
+}) {
+  const val = handValue(hand.cards);
+  const showLabel = totalHands > 1;
+
+  return (
+    <div style={{
+      border: isActive ? "2px solid #d4a843" : "1px solid rgba(255,255,255,0.1)",
+      borderRadius: 12, padding: 12, background: isActive ? "rgba(212,168,67,0.08)" : "transparent",
+      transition: "all 0.3s",
+    }}>
+      {showLabel && (
+        <p style={{ fontSize: "0.75rem", color: "#d4a843", marginBottom: 6, textTransform: "uppercase", letterSpacing: 1 }}>
+          Hand {handIndex + 1} · ${hand.bet}
+        </p>
+      )}
+      <div style={{ display: "flex", gap: 6, justifyContent: "center", minHeight: 84, alignItems: "center", flexWrap: "wrap" }}>
+        {hand.cards.map((card, i) => (
+          <CardDisplay key={i} card={card} index={i} small={totalHands > 1} />
+        ))}
+      </div>
+      <div style={{ textAlign: "center", marginTop: 8 }}>
+        <span style={{
+          display: "inline-block",
+          background:
+            hand.status === "bust" ? "rgba(192,57,43,0.7)" :
+            hand.status === "blackjack" ? "rgba(212,168,67,0.7)" :
+            hand.status === "surrendered" ? "rgba(255,255,255,0.15)" :
+            hand.status === "doubled" ? "rgba(52,152,219,0.5)" :
+            "rgba(0,0,0,0.5)",
+          color: hand.status === "blackjack" ? "#1a1a1a" : "white",
+          padding: "3px 12px", borderRadius: 20, fontSize: "0.8rem",
+        }}>
+          {hand.status === "bust" ? `Bust! (${val})` :
+           hand.status === "blackjack" ? "BLACKJACK!" :
+           hand.status === "surrendered" ? "Surrendered" :
+           hand.status === "doubled" ? `Doubled (${val})` :
+           val}
+        </span>
+      </div>
+      {/* Result */}
+      {hand.result && (
+        <div style={{
+          textAlign: "center", marginTop: 8, padding: "6px 10px", borderRadius: 8,
+          background:
+            hand.result === "win" || hand.result === "blackjack" ? "rgba(39,174,96,0.2)" :
+            hand.result === "push" ? "rgba(255,255,255,0.1)" :
+            hand.result === "surrender" ? "rgba(255,255,255,0.08)" :
+            "rgba(192,57,43,0.2)",
+          fontSize: "0.85rem", fontWeight: "bold",
+          color:
+            hand.result === "win" ? "#27ae60" :
+            hand.result === "blackjack" ? "#d4a843" :
+            hand.result === "push" ? "rgba(255,255,255,0.7)" :
+            hand.result === "surrender" ? "rgba(255,255,255,0.5)" :
+            "#e74c3c",
+        }}>
+          {hand.result === "blackjack" ? `BLACKJACK! +$${Math.floor(hand.bet * 1.5)}` :
+           hand.result === "win" ? `WIN! +$${hand.bet}` :
+           hand.result === "push" ? "PUSH" :
+           hand.result === "surrender" ? `SURRENDER −$${Math.floor(hand.bet)}` :
+           `LOSE −$${hand.bet}`}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -102,7 +209,6 @@ export default function GamePage() {
   const [playerName, setPlayerName] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const channelRef = useRef<ReturnType<ReturnType<typeof getPusherClient>["subscribe"]> | null>(null);
 
   // ── Fetch & Subscribe ───────────────────────────────────────────────────
   useEffect(() => {
@@ -111,34 +217,20 @@ export default function GamePage() {
     setPlayerName(name);
     setPlayerIndex(idx);
 
-    // Fetch initial state
     fetch(`/api/game/${code}`)
       .then((r) => r.json())
       .then((data) => {
-        if (data.error) {
-          setError(data.error);
-        } else {
-          setGameState(data.state);
-        }
+        if (data.error) setError(data.error);
+        else setGameState(data.state);
         setLoading(false);
       })
-      .catch(() => {
-        setError("Failed to connect");
-        setLoading(false);
-      });
+      .catch(() => { setError("Failed to connect"); setLoading(false); });
 
-    // Subscribe to Pusher
     const pusher = getPusherClient();
     const channel = pusher.subscribe(`game-${code}`);
-    channel.bind("state-update", (state: ClientGameState) => {
-      setGameState(state);
-    });
-    channelRef.current = channel;
+    channel.bind("state-update", (state: ClientGameState) => setGameState(state));
 
-    return () => {
-      channel.unbind_all();
-      pusher.unsubscribe(`game-${code}`);
-    };
+    return () => { channel.unbind_all(); pusher.unsubscribe(`game-${code}`); };
   }, [code]);
 
   // ── Send Action ─────────────────────────────────────────────────────────
@@ -151,9 +243,7 @@ export default function GamePage() {
           body: JSON.stringify(action),
         });
         const data = await res.json();
-        if (!res.ok) {
-          setError(data.error || "Action failed");
-        }
+        if (!res.ok) setError(data.error || "Action failed");
       } catch {
         setError("Connection error");
       }
@@ -187,23 +277,67 @@ export default function GamePage() {
 
   // ── Waiting Phase ───────────────────────────────────────────────────────
   if (phase === "waiting") {
+    const isHost = playerIndex === 0;
     return (
       <div style={{ minHeight: "100vh", background: "radial-gradient(ellipse at center, #1a7a3a 0%, #0d5c2e 50%, #062a14 100%)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", fontFamily: "Georgia, serif", color: "white", padding: 20 }}>
         <h1 style={{ fontSize: "3rem", color: "#d4a843", textShadow: "2px 3px 6px rgba(0,0,0,0.5)", marginBottom: 8, letterSpacing: 4 }}>
           ♠ BLACKJACK ♠
         </h1>
-        <p style={{ color: "rgba(255,255,255,0.7)", marginBottom: 40, fontSize: "1.1rem" }}>
-          Waiting for Player 2...
-        </p>
-        <div style={{ background: "rgba(0,0,0,0.3)", borderRadius: 16, padding: "32px 48px", textAlign: "center", border: "2px solid rgba(212,168,67,0.4)" }}>
-          <p style={{ color: "rgba(255,255,255,0.6)", fontSize: "0.9rem", marginBottom: 12, textTransform: "uppercase", letterSpacing: 1 }}>
+
+        <div style={{ background: "rgba(0,0,0,0.3)", borderRadius: 16, padding: "32px 48px", textAlign: "center", border: "2px solid rgba(212,168,67,0.4)", marginBottom: 24, minWidth: 320 }}>
+          <p style={{ color: "rgba(255,255,255,0.6)", fontSize: "0.85rem", marginBottom: 12, textTransform: "uppercase", letterSpacing: 1 }}>
             Share this room code
           </p>
           <p style={{ fontSize: "3.5rem", color: "#d4a843", letterSpacing: 12, fontWeight: "bold", textShadow: "0 0 20px rgba(212,168,67,0.3)" }}>
             {code}
           </p>
         </div>
-        <button onClick={() => router.push("/")} style={{ marginTop: 30, background: "none", border: "1px solid rgba(255,255,255,0.2)", color: "rgba(255,255,255,0.6)", padding: "10px 24px", borderRadius: 8, cursor: "pointer", fontFamily: "Georgia, serif", fontSize: "0.9rem" }}>
+
+        {/* Player List */}
+        <div style={{ background: "rgba(0,0,0,0.2)", borderRadius: 12, padding: "16px 32px", marginBottom: 24, minWidth: 280 }}>
+          <p style={{ color: "rgba(255,255,255,0.5)", fontSize: "0.8rem", textTransform: "uppercase", letterSpacing: 1, marginBottom: 12 }}>
+            Players ({players.length}/6)
+          </p>
+          {players.map((p, i) => (
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0", borderBottom: i < players.length - 1 ? "1px solid rgba(255,255,255,0.1)" : "none" }}>
+              <span style={{ width: 24, height: 24, borderRadius: "50%", background: i === 0 ? "#d4a843" : "rgba(255,255,255,0.2)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "0.7rem", fontWeight: "bold", color: i === 0 ? "#1a1a1a" : "white" }}>
+                {i + 1}
+              </span>
+              <span style={{ color: i === playerIndex ? "#d4a843" : "white", fontWeight: i === playerIndex ? "bold" : "normal" }}>
+                {p.name} {i === playerIndex && "(You)"} {i === 0 && "★"}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        {/* Start / Leave buttons */}
+        <div style={{ display: "flex", gap: 12 }}>
+          {isHost && players.length >= 2 && (
+            <button
+              onClick={() => sendAction({ type: "start_game" })}
+              style={{
+                padding: "14px 40px", background: "#d4a843", color: "#1a1a1a", border: "none", borderRadius: 8,
+                fontSize: "1.1rem", fontWeight: "bold", cursor: "pointer", fontFamily: "Georgia, serif",
+                textTransform: "uppercase", letterSpacing: 1,
+                animation: "pulse 2s ease-in-out infinite",
+              }}
+            >
+              Start Game
+            </button>
+          )}
+          {isHost && players.length < 2 && (
+            <p style={{ color: "rgba(255,255,255,0.5)", fontSize: "0.9rem" }}>
+              Waiting for at least 1 more player...
+            </p>
+          )}
+          {!isHost && (
+            <p style={{ color: "rgba(255,255,255,0.5)", fontSize: "0.9rem" }}>
+              Waiting for host to start the game...
+            </p>
+          )}
+        </div>
+
+        <button onClick={() => router.push("/")} style={{ marginTop: 20, background: "none", border: "1px solid rgba(255,255,255,0.2)", color: "rgba(255,255,255,0.6)", padding: "10px 24px", borderRadius: 8, cursor: "pointer", fontFamily: "Georgia, serif", fontSize: "0.9rem" }}>
           ← Leave
         </button>
 
@@ -216,45 +350,86 @@ export default function GamePage() {
     );
   }
 
+  // ── Insurance Phase ────────────────────────────────────────────────────
+  if (phase === "insurance") {
+    const me = players[playerIndex];
+    const needsDecision = me && me.status === "betting";
+    const insuranceCost = me ? Math.floor((me.hands[0]?.bet || 0) / 2) : 0;
+
+    return (
+      <div style={{ minHeight: "100vh", background: "radial-gradient(ellipse at center, #1a7a3a 0%, #0d5c2e 50%, #062a14 100%)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", fontFamily: "Georgia, serif", color: "white", padding: 20 }}>
+        <h1 style={{ fontSize: "2.5rem", color: "#d4a843", marginBottom: 8, letterSpacing: 4 }}>♠ BLACKJACK ♠</h1>
+
+        {/* Dealer showing Ace */}
+        <div style={{ textAlign: "center", marginBottom: 24 }}>
+          <h2 style={{ color: "#d4a843", fontSize: "1rem", marginBottom: 12 }}>DEALER</h2>
+          <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+            {dealerHand.map((card, i) => <CardDisplay key={i} card={card} index={i} />)}
+          </div>
+        </div>
+
+        <div style={{ background: "rgba(0,0,0,0.3)", borderRadius: 16, padding: "32px 48px", textAlign: "center", border: "2px solid rgba(212,168,67,0.4)", maxWidth: 400 }}>
+          <h2 style={{ color: "#d4a843", fontSize: "1.3rem", marginBottom: 16 }}>INSURANCE?</h2>
+          <p style={{ color: "rgba(255,255,255,0.7)", fontSize: "0.9rem", marginBottom: 20 }}>
+            Dealer shows an Ace. Buy insurance for <strong style={{ color: "#d4a843" }}>${insuranceCost}</strong>?
+            <br />
+            <span style={{ fontSize: "0.8rem" }}>Pays 2:1 if dealer has Blackjack</span>
+          </p>
+
+          {needsDecision ? (
+            <div style={{ display: "flex", gap: 12, justifyContent: "center" }}>
+              <ActionBtn label={`Yes ($${insuranceCost})`} onClick={() => sendAction({ type: "insurance", playerIndex, accept: true })} color="#27ae60" disabled={insuranceCost > me.chips} />
+              <ActionBtn label="No Thanks" onClick={() => sendAction({ type: "insurance", playerIndex, accept: false })} color="#c0392b" />
+            </div>
+          ) : (
+            <p style={{ color: "rgba(255,255,255,0.5)" }}>Waiting for other players...</p>
+          )}
+        </div>
+
+        <style>{`
+          @keyframes cardEnter { from { opacity:0; transform:translateY(-40px) rotate(-10deg) scale(0.8); } to { opacity:1; transform:translateY(0) rotate(0deg) scale(1); } }
+          .card-enter { animation: cardEnter 0.4s ease-out forwards; }
+        `}</style>
+      </div>
+    );
+  }
+
   // ── Game Table Layout (betting, playing, dealer-turn, results) ──────────
   const showDealerFull = phase === "dealer-turn" || phase === "results";
+  const manyPlayers = players.length > 3;
 
   return (
     <div style={{ minHeight: "100vh", background: "radial-gradient(ellipse at center, #1a7a3a 0%, #0d5c2e 50%, #062a14 100%)", display: "flex", flexDirection: "column", fontFamily: "Georgia, serif", color: "white" }}>
 
       {/* Top Bar */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 24px", background: "rgba(0,0,0,0.3)", flexWrap: "wrap", gap: 8 }}>
-        <div style={{ fontSize: "0.85rem", color: "rgba(255,255,255,0.6)" }}>
-          Round {roundNumber} · {cardsRemaining} cards · {deckCount}-deck shoe · Code: <strong style={{ color: "#d4a843" }}>{code}</strong>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 20px", background: "rgba(0,0,0,0.3)", flexWrap: "wrap", gap: 6 }}>
+        <div style={{ fontSize: "0.8rem", color: "rgba(255,255,255,0.6)" }}>
+          Round {roundNumber} · {cardsRemaining} cards · {deckCount}-deck shoe · Room: <strong style={{ color: "#d4a843" }}>{code}</strong> · {players.length} players
         </div>
-        <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-          {error && (
-            <span style={{ color: "#e74c3c", fontSize: "0.8rem" }}>{error}</span>
-          )}
+        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          {error && <span style={{ color: "#e74c3c", fontSize: "0.75rem" }}>{error}</span>}
           {message && (
-            <span style={{ background: "rgba(212,168,67,0.2)", color: "#d4a843", padding: "6px 16px", borderRadius: 20, fontSize: "0.9rem", fontWeight: "bold" }}>
+            <span style={{ background: "rgba(212,168,67,0.2)", color: "#d4a843", padding: "4px 14px", borderRadius: 20, fontSize: "0.8rem", fontWeight: "bold" }}>
               {message}
             </span>
           )}
-          <button onClick={() => router.push("/")} style={{ background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)", color: "rgba(255,255,255,0.7)", padding: "6px 16px", borderRadius: 6, cursor: "pointer", fontSize: "0.8rem", fontFamily: "Georgia, serif" }}>
-            Leave Table
+          <button onClick={() => router.push("/")} style={{ background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)", color: "rgba(255,255,255,0.7)", padding: "5px 14px", borderRadius: 6, cursor: "pointer", fontSize: "0.75rem", fontFamily: "Georgia, serif" }}>
+            Leave
           </button>
         </div>
       </div>
 
       {/* Dealer Area */}
-      <div style={{ textAlign: "center", padding: "24px 20px 16px" }}>
-        <h2 style={{ color: "#d4a843", fontSize: "1.1rem", marginBottom: 12 }}>DEALER</h2>
+      <div style={{ textAlign: "center", padding: "20px 20px 12px" }}>
+        <h2 style={{ color: "#d4a843", fontSize: "1rem", marginBottom: 10 }}>DEALER</h2>
         <div style={{ display: "flex", gap: 8, justifyContent: "center", minHeight: 112, alignItems: "center", flexWrap: "wrap" }}>
-          {dealerHand.map((card, i) => (
-            <CardDisplay key={i} card={card} index={i} />
-          ))}
+          {dealerHand.map((card, i) => <CardDisplay key={i} card={card} index={i} />)}
         </div>
         {dealerHand.length > 0 && (
           <div style={{
             display: "inline-block",
             background: showDealerFull && handValue(dealerHand) > 21 ? "rgba(192,57,43,0.7)" : "rgba(0,0,0,0.5)",
-            padding: "4px 14px", borderRadius: 20, fontSize: "0.9rem", marginTop: 10,
+            padding: "3px 12px", borderRadius: 20, fontSize: "0.85rem", marginTop: 8,
           }}>
             {showDealerFull
               ? handValue(dealerHand) > 21
@@ -265,167 +440,147 @@ export default function GamePage() {
         )}
       </div>
 
-      {/* Divider */}
-      <div style={{ borderTop: "1px solid rgba(212,168,67,0.2)", margin: "0 40px" }} />
+      <div style={{ borderTop: "1px solid rgba(212,168,67,0.2)", margin: "0 30px" }} />
 
       {/* Players Area */}
-      <div style={{ flex: 1, display: "flex", justifyContent: "center", gap: 30, padding: "24px 20px", flexWrap: "wrap", alignItems: "flex-start" }}>
+      <div style={{
+        flex: 1, display: "flex", justifyContent: "center", gap: manyPlayers ? 12 : 20,
+        padding: "16px 12px", flexWrap: "wrap", alignItems: "flex-start",
+      }}>
         {players.map((player, pi) => {
           const isMe = pi === playerIndex;
-          const isActive = phase === "playing" && currentPlayer === pi && player.status === "playing";
+          const isActivePlayer = phase === "playing" && currentPlayer === pi && player.status === "playing";
+          const currentHand = player.hands[player.currentHandIndex];
+          const canAct = isMe && isActivePlayer && currentHand && currentHand.status === "playing";
+
+          // Can double: first 2 cards only, enough chips
+          const canDouble = canAct && currentHand.cards.length === 2 && currentHand.bet <= player.chips;
+          // Can split: pair, only 1 hand, enough chips
+          const canSplitNow = canAct && player.hands.length === 1 && canSplitHand(currentHand.cards) && currentHand.bet <= player.chips;
+          // Can surrender: first 2 cards, no split
+          const canSurrenderNow = canAct && currentHand.cards.length === 2 && player.hands.length === 1;
 
           return (
             <div
               key={pi}
               style={{
-                flex: "0 1 420px",
+                flex: manyPlayers ? "0 1 280px" : "0 1 380px",
                 background: "rgba(0,0,0,0.15)",
-                borderRadius: 16, padding: 24,
-                border: `2px solid ${isActive ? "#d4a843" : "rgba(255,255,255,0.1)"}`,
-                boxShadow: isActive ? "0 0 20px rgba(212,168,67,0.2)" : "none",
+                borderRadius: 14, padding: manyPlayers ? 14 : 20,
+                border: `2px solid ${isActivePlayer ? "#d4a843" : isMe ? "rgba(212,168,67,0.25)" : "rgba(255,255,255,0.08)"}`,
+                boxShadow: isActivePlayer ? "0 0 20px rgba(212,168,67,0.2)" : "none",
                 transition: "border-color 0.3s, box-shadow 0.3s",
               }}
             >
               {/* Player Header */}
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-                <h3 style={{ fontSize: "1.15rem", color: isMe ? "#d4a843" : "rgba(255,255,255,0.8)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                <h3 style={{ fontSize: manyPlayers ? "0.9rem" : "1rem", color: isMe ? "#d4a843" : "rgba(255,255,255,0.8)", margin: 0 }}>
                   {player.name} {isMe && "(You)"}
                 </h3>
-                <span style={{ background: "rgba(0,0,0,0.4)", padding: "4px 12px", borderRadius: 20, fontSize: "0.85rem" }}>
-                  💰 ${player.chips}
+                <span style={{ background: "rgba(0,0,0,0.4)", padding: "3px 10px", borderRadius: 20, fontSize: "0.8rem" }}>
+                  ${player.chips}
                 </span>
               </div>
+
+              {/* Insurance result */}
+              {player.insuranceBet > 0 && player.insuranceResult && (
+                <div style={{
+                  textAlign: "center", marginBottom: 8, padding: "3px 8px", borderRadius: 6,
+                  fontSize: "0.75rem", fontWeight: "bold",
+                  background: player.insuranceResult === "win" ? "rgba(39,174,96,0.2)" : "rgba(192,57,43,0.15)",
+                  color: player.insuranceResult === "win" ? "#27ae60" : "#e74c3c",
+                }}>
+                  Insurance: {player.insuranceResult === "win" ? `+$${player.insuranceBet * 2}` : `-$${player.insuranceBet}`}
+                </div>
+              )}
 
               {/* Betting Phase */}
               {phase === "betting" && player.status === "betting" && isMe && (
                 <div style={{ textAlign: "center" }}>
-                  <p style={{ marginBottom: 12, fontSize: "0.9rem", color: "rgba(255,255,255,0.7)" }}>
-                    Current bet: <strong style={{ color: "#d4a843" }}>${player.bet}</strong>
+                  <p style={{ marginBottom: 10, fontSize: "0.85rem", color: "rgba(255,255,255,0.7)" }}>
+                    Bet: <strong style={{ color: "#d4a843" }}>${player.bet}</strong>
                   </p>
-                  <div style={{ display: "flex", gap: 8, justifyContent: "center", marginBottom: 16, flexWrap: "wrap" }}>
+                  <div style={{ display: "flex", gap: 6, justifyContent: "center", marginBottom: 12, flexWrap: "wrap" }}>
                     {CHIP_VALUES.map((val) => (
                       <Chip key={val} value={val} onClick={() => sendAction({ type: "place_bet", playerIndex: pi, amount: val })} disabled={val > player.chips} />
                     ))}
                   </div>
-                  <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
-                    <button onClick={() => sendAction({ type: "clear_bet", playerIndex: pi })} style={{ padding: "8px 20px", background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)", color: "white", borderRadius: 8, cursor: "pointer", fontSize: "0.85rem", fontFamily: "Georgia, serif" }}>
+                  <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+                    <button onClick={() => sendAction({ type: "clear_bet", playerIndex: pi })} style={{ padding: "7px 16px", background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)", color: "white", borderRadius: 8, cursor: "pointer", fontSize: "0.8rem", fontFamily: "Georgia, serif" }}>
                       Clear
                     </button>
                     <button
                       onClick={() => sendAction({ type: "confirm_bet", playerIndex: pi })}
                       disabled={player.bet === 0}
                       style={{
-                        padding: "8px 24px",
+                        padding: "7px 20px",
                         background: player.bet > 0 ? "#d4a843" : "rgba(212,168,67,0.3)",
                         color: player.bet > 0 ? "#1a1a1a" : "rgba(255,255,255,0.4)",
                         border: "none", borderRadius: 8, fontWeight: "bold",
                         cursor: player.bet > 0 ? "pointer" : "not-allowed",
-                        fontSize: "0.85rem", fontFamily: "Georgia, serif", textTransform: "uppercase",
+                        fontSize: "0.8rem", fontFamily: "Georgia, serif", textTransform: "uppercase",
                       }}
                     >
-                      Confirm Bet
+                      Confirm
                     </button>
                   </div>
                 </div>
               )}
 
-              {/* Betting — other player or already confirmed */}
               {phase === "betting" && player.status === "betting" && !isMe && (
-                <div style={{ textAlign: "center", color: "rgba(255,255,255,0.5)", fontSize: "0.9rem" }}>
-                  Placing bet...
-                </div>
+                <p style={{ textAlign: "center", color: "rgba(255,255,255,0.4)", fontSize: "0.85rem" }}>Placing bet...</p>
               )}
               {phase === "betting" && player.status === "done" && (
                 <div style={{ textAlign: "center", color: "rgba(255,255,255,0.6)" }}>
                   <p>Bet: <strong style={{ color: "#d4a843" }}>${player.bet}</strong></p>
-                  <p style={{ fontSize: "0.85rem", marginTop: 4 }}>✓ Ready</p>
+                  <p style={{ fontSize: "0.8rem", marginTop: 4 }}>✓ Ready</p>
                 </div>
               )}
 
-              {/* Cards */}
-              {player.hand.length > 0 && (
-                <>
-                  <div style={{ display: "flex", gap: 8, justifyContent: "center", minHeight: 112, alignItems: "center", marginTop: 8, flexWrap: "wrap" }}>
-                    {player.hand.map((card, i) => (
-                      <CardDisplay key={i} card={card} index={i} />
-                    ))}
-                  </div>
-                  <div style={{ textAlign: "center", marginTop: 10 }}>
-                    <span style={{
-                      display: "inline-block",
-                      background:
-                        player.status === "bust" ? "rgba(192,57,43,0.7)" :
-                        player.status === "blackjack" ? "rgba(212,168,67,0.7)" :
-                        "rgba(0,0,0,0.5)",
-                      color: player.status === "blackjack" ? "#1a1a1a" : "white",
-                      padding: "4px 14px", borderRadius: 20, fontSize: "0.9rem",
-                    }}>
-                      {player.status === "bust" ? `Bust! (${handValue(player.hand)})` :
-                       player.status === "blackjack" ? "BLACKJACK!" :
-                       handValue(player.hand)}
-                    </span>
-                    {player.bet > 0 && phase !== "betting" && (
-                      <span style={{ display: "inline-block", marginLeft: 8, background: "rgba(0,0,0,0.3)", padding: "4px 12px", borderRadius: 20, fontSize: "0.8rem", color: "rgba(255,255,255,0.6)" }}>
-                        Bet: ${player.bet}
-                      </span>
-                    )}
-                  </div>
-                </>
+              {/* Hands (playing/results) */}
+              {player.hands.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+                  {player.hands.map((hand, hi) => (
+                    <HandDisplay
+                      key={hi}
+                      hand={hand}
+                      handIndex={hi}
+                      totalHands={player.hands.length}
+                      isActive={isActivePlayer && hi === player.currentHandIndex}
+                    />
+                  ))}
+                </div>
               )}
 
-              {/* Hit / Stand Buttons */}
-              {isActive && isMe && (
-                <div style={{ display: "flex", gap: 12, justifyContent: "center", marginTop: 16 }}>
-                  <button
-                    onClick={() => sendAction({ type: "hit", playerIndex: pi })}
-                    style={{ padding: "12px 32px", background: "#27ae60", color: "white", border: "none", borderRadius: 8, fontSize: "1rem", fontWeight: "bold", cursor: "pointer", textTransform: "uppercase", letterSpacing: 1, fontFamily: "Georgia, serif" }}
-                  >
-                    Hit
-                  </button>
-                  <button
-                    onClick={() => sendAction({ type: "stand", playerIndex: pi })}
-                    style={{ padding: "12px 32px", background: "#c0392b", color: "white", border: "none", borderRadius: 8, fontSize: "1rem", fontWeight: "bold", cursor: "pointer", textTransform: "uppercase", letterSpacing: 1, fontFamily: "Georgia, serif" }}
-                  >
-                    Stand
-                  </button>
+              {/* Bet display when only 1 hand */}
+              {player.hands.length === 1 && player.hands[0].bet > 0 && phase !== "betting" && !player.hands[0].result && (
+                <p style={{ textAlign: "center", fontSize: "0.8rem", color: "rgba(255,255,255,0.5)", marginTop: 4 }}>
+                  Bet: ${player.hands[0].bet}
+                </p>
+              )}
+
+              {/* Action Buttons */}
+              {canAct && (
+                <div style={{ display: "flex", gap: 8, justifyContent: "center", marginTop: 14, flexWrap: "wrap" }}>
+                  <ActionBtn label="Hit" onClick={() => sendAction({ type: "hit", playerIndex: pi })} color="#27ae60" />
+                  <ActionBtn label="Stand" onClick={() => sendAction({ type: "stand", playerIndex: pi })} color="#c0392b" />
+                  {canDouble && (
+                    <ActionBtn label={`Double`} onClick={() => sendAction({ type: "double_down", playerIndex: pi })} color="#2980b9" />
+                  )}
+                  {canSplitNow && (
+                    <ActionBtn label="Split" onClick={() => sendAction({ type: "split", playerIndex: pi })} color="#8e44ad" />
+                  )}
+                  {canSurrenderNow && (
+                    <ActionBtn label="Surrender" onClick={() => sendAction({ type: "surrender", playerIndex: pi })} color="#7f8c8d" />
+                  )}
                 </div>
               )}
 
               {/* Waiting for turn */}
-              {phase === "playing" && !isActive && player.status === "playing" && (
-                <p style={{ textAlign: "center", marginTop: 12, color: "rgba(255,255,255,0.5)", fontSize: "0.85rem" }}>
-                  Waiting for turn...
+              {phase === "playing" && !isActivePlayer && player.status === "playing" && (
+                <p style={{ textAlign: "center", marginTop: 10, color: "rgba(255,255,255,0.4)", fontSize: "0.8rem" }}>
+                  Waiting...
                 </p>
-              )}
-
-              {/* Results */}
-              {phase === "results" && player.result && (
-                <div style={{
-                  textAlign: "center", marginTop: 16, padding: 12, borderRadius: 8,
-                  background:
-                    player.result === "win" || player.result === "blackjack" ? "rgba(39,174,96,0.2)" :
-                    player.result === "push" ? "rgba(255,255,255,0.1)" :
-                    "rgba(192,57,43,0.2)",
-                  border: `1px solid ${
-                    player.result === "win" || player.result === "blackjack" ? "rgba(39,174,96,0.4)" :
-                    player.result === "push" ? "rgba(255,255,255,0.2)" :
-                    "rgba(192,57,43,0.4)"
-                  }`,
-                }}>
-                  <p style={{
-                    fontSize: "1.2rem", fontWeight: "bold",
-                    color:
-                      player.result === "win" ? "#27ae60" :
-                      player.result === "blackjack" ? "#d4a843" :
-                      player.result === "push" ? "rgba(255,255,255,0.7)" :
-                      "#e74c3c",
-                  }}>
-                    {player.result === "blackjack" ? `BLACKJACK! +$${Math.floor(player.bet * 1.5)}` :
-                     player.result === "win" ? `WIN! +$${player.bet}` :
-                     player.result === "push" ? "PUSH — Bet returned" :
-                     `LOSE — -$${player.bet}`}
-                  </p>
-                </div>
               )}
             </div>
           );
@@ -434,15 +589,15 @@ export default function GamePage() {
 
       {/* Results — New Round Button */}
       {phase === "results" && (
-        <div style={{ textAlign: "center", padding: "0 20px 30px" }}>
+        <div style={{ textAlign: "center", padding: "0 20px 24px" }}>
           {players.some((p) => p.chips <= 0) ? (
             <div>
-              <p style={{ marginBottom: 16, fontSize: "1.1rem" }}>
-                {players.find((p) => p.chips <= 0)?.name} is out of chips!
+              <p style={{ marginBottom: 12, fontSize: "1rem" }}>
+                {players.filter((p) => p.chips <= 0).map(p => p.name).join(", ")} out of chips!
               </p>
               <button
                 onClick={() => sendAction({ type: "back_to_lobby" })}
-                style={{ padding: "14px 40px", background: "#d4a843", color: "#1a1a1a", border: "none", borderRadius: 8, fontSize: "1.1rem", fontWeight: "bold", cursor: "pointer", fontFamily: "Georgia, serif", textTransform: "uppercase", letterSpacing: 1 }}
+                style={{ padding: "12px 36px", background: "#d4a843", color: "#1a1a1a", border: "none", borderRadius: 8, fontSize: "1rem", fontWeight: "bold", cursor: "pointer", fontFamily: "Georgia, serif", textTransform: "uppercase", letterSpacing: 1 }}
               >
                 New Game
               </button>
@@ -450,7 +605,7 @@ export default function GamePage() {
           ) : (
             <button
               onClick={() => sendAction({ type: "new_round" })}
-              style={{ padding: "14px 40px", background: "#d4a843", color: "#1a1a1a", border: "none", borderRadius: 8, fontSize: "1.1rem", fontWeight: "bold", cursor: "pointer", fontFamily: "Georgia, serif", textTransform: "uppercase", letterSpacing: 1 }}
+              style={{ padding: "12px 36px", background: "#d4a843", color: "#1a1a1a", border: "none", borderRadius: 8, fontSize: "1rem", fontWeight: "bold", cursor: "pointer", fontFamily: "Georgia, serif", textTransform: "uppercase", letterSpacing: 1 }}
             >
               Next Round
             </button>
